@@ -187,6 +187,7 @@ const MEDIA_MIME = {
   '.jpeg': 'image/jpeg',
   '.gif': 'image/gif',
   '.webp': 'image/webp',
+  '.tgs': 'application/gzip', // animated sticker = gzipped Lottie JSON
   '.bmp': 'image/bmp',
   '.svg': 'image/svg+xml',
   '.mp3': 'audio/mpeg',
@@ -553,6 +554,46 @@ export class TelegramClient {
       opts.signal, this.requestTimeoutMs);
   }
 
+  /**
+   * Send a sticker (Bot API sendSticker). Stickers take NO caption — the API
+   * does not support one. `opts.sticker` may be a Telegram file_id (a sticker
+   * previously seen by THIS bot — recommended), an HTTP URL (static .WEBP
+   * stickers only; video/animated cannot be sent by URL), or an absolute local
+   * path to a .WEBP/.TGS/.WEBM sticker file (uploaded via multipart).
+   */
+  async sendSticker(opts) {
+    const local = this._localPathOr(opts.sticker);
+    if (local) {
+      return tgUploadFile(this.baseUrl, this.botToken, 'sendSticker', 'sticker',
+        opts.chatId, local, { messageThreadId: opts.messageThreadId }, opts.signal, this.requestTimeoutMs);
+    }
+    const body = {
+      chat_id: String(opts.chatId),
+      sticker: opts.sticker,
+    };
+    if (opts.messageThreadId) body.message_thread_id = opts.messageThreadId;
+    if (opts.emoji) body.emoji = opts.emoji; // only meaningful for just-uploaded stickers
+    const resp = await this._api('sendSticker', body, opts.signal);
+    const msg = resp.result;
+    if (!msg) throw new Error('sendSticker returned no result');
+    return {
+      messageId: Number(msg.message_id),
+      chatId: String(msg.chat?.id ?? opts.chatId),
+    };
+  }
+
+  /**
+   * Fetch a full sticker set by name (Bot API getStickerSet). Returns the raw
+   * Bot API result ({ name, title, sticker_type, stickers: [Sticker...] });
+   * callers normalize via sticker-store's normalizeSticker/recordSet.
+   */
+  async getStickerSet(name, signal) {
+    const resp = await this._api('getStickerSet', { name: String(name || '') }, signal);
+    const result = resp.result;
+    if (!result) throw new Error(`getStickerSet returned no result for ${name}`);
+    return result;
+  }
+
   async answerCallbackQuery(queryId, text, showAlert) {
     await this._api('answerCallbackQuery', {
       callback_query_id: queryId,
@@ -732,6 +773,10 @@ export class TelegramClient {
       video: raw.video || undefined,
       audio: raw.audio || undefined,
       voice: raw.voice || undefined,
+      // Full raw Sticker object (file_id/file_unique_id/emoji/set_name/...).
+      // A sticker message has NO text — the inbound handler must special-case
+      // it or the message is silently dropped.
+      sticker: raw.sticker || undefined,
       replyToMessageId: raw.reply_to_message?.message_id,
       messageThreadId: raw.message_thread_id,
       timestamp: Number(raw.date) * 1000,

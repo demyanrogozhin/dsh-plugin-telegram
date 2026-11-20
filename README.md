@@ -32,6 +32,9 @@ Based on the Telegram channel implementation from [QwenPaw](https://github.com/Q
 | `telegram_send_audio` | Send an audio file (file_id, URL, or local path) |
 | `telegram_send_video` | Send a video to a chat |
 | `telegram_send_voice` | Synthesize text to a voice note via local Qwen3-TTS and send as OGG Opus |
+| `telegram_send_sticker` | Send a real Telegram sticker (alias, file_unique_id/file_id from the catalog, raw file_id, .WEBP URL, or local .WEBP/.TGS/.WEBM path) |
+| `telegram_get_sticker_set` | Fetch a full sticker set by name and cache every sticker into the catalog |
+| `telegram_sticker_alias` | List / set / remove named aliases for catalog stickers (e.g. remember "med-time" for scheduled sends) |
 | `telegram_edit_message` | Edit an existing message |
 | `telegram_delete_message` | Delete a message |
 | `telegram_get_info` | Get info about all configured bot(s) — returns an array, one entry per bot |
@@ -226,6 +229,7 @@ dsh web --patch ./cordis.yml
 | `autopilotWindowMs` | number | `10000` | How long an autopilot `ask_user_question` notice waits before auto-committing the recommended option (`0` = commit immediately). Gives you a window to tap `✋ 接管` to take over. |
 | `questionsTimeoutSec` | number | `1800` | How long a question card waits for an answer before auto-cancelling (agent turn unblocks). `0` = no expiry. Mirrors `approvalTimeoutSec`. |
 | `sttEndpoint` | string | `http://127.0.0.1:18068` | OpenAI-compatible Whisper base URL used to transcribe inbound voice notes (same service `dsh-tool-audio`'s `transcribe_audio` hits). |
+| `stickerStorePath` | string | `''` | Sticker catalog file (collected sets, full sticker structures, aliases). `''` = `$DSH_HOME/telegram-stickers.json`. Runtime data owned by the plugin — see "Sticker catalog & aliases". |
 | `voiceTranscribe` | boolean | `true` | When the user sends a voice note, transcribe it and reply with the text under the voice bubble (🎧). Requires `forwardInboundMedia`. |
 | `voiceTranscribeLanguage` | string | `auto` | Force a language code (e.g. `zh`/`en`) for transcription, or `auto` to let Whisper detect it. |
 | `voiceTranscriptToAgent` | boolean | `true` | Also include the transcript in the message injected to the agent, so it already has the words and does NOT re-run `transcribe_audio`. |
@@ -373,6 +377,37 @@ The transcript is shown verbatim — no LLM re-phrase — so display is fast and
 cost-free. The whole feature is best-effort: if the service is down or the audio
 is silent, the voice note is still injected and answered normally (just no
 transcript line). Set `voiceTranscribe: false` to turn it off.
+
+### Sticker catalog & aliases (🩹)
+
+Real stickers (not emoji, not GIFs) are supported in **both directions**:
+
+**Inbound.** A sticker the user sends is no longer silently dropped (it has no
+`text` and none of the classic media fields, so it used to fall through every
+gate). The plugin now:
+
+1. records the sticker (full structure) into the runtime catalog at
+   `$DSH_HOME/telegram-stickers.json` (override: `stickerStorePath` config);
+2. fetches the sticker's **whole pack** via `getStickerSet(set_name)` and caches
+   every sticker of it — sending one sticker is enough, no manual forwarding;
+3. tells the agent what arrived: emoji, static/animated/video, size, set name,
+   `file_id` and `file_unique_id`.
+
+**Outbound.** `telegram_send_sticker` sends a real sticker bubble. Its
+`sticker` argument accepts, in order:
+
+- an **alias** defined via `telegram_sticker_alias` (e.g. `"med-time"`);
+- a **`file_unique_id`** or `file_id` from the catalog (stickers are keyed by
+  `file_unique_id` — stable, collision-free; emoji are NOT unique within a pack);
+- a raw Telegram `file_id` (any sticker this bot has seen), a public `.WEBP`
+  URL, or a local `.WEBP`/`.TGS`/`.WEBM` sticker file (multipart upload).
+
+If a catalog `file_id` ever goes stale (the pack was updated on Telegram's
+side), the plugin transparently re-fetches that set once and retries.
+
+The catalog is **runtime data owned by the plugin** (atomic writes, reloaded on
+external change) — keep it out of declarative config; populate it by using the
+bot: send stickers, then `telegram_sticker_alias` with action `set`.
 
 ### Live trajectory (tool calls + thinking)
 

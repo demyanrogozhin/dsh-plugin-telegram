@@ -36,6 +36,7 @@ export function sniffImageMediaType(bytes) {
 /** Ordered media kinds; first present key on the message wins. */
 const INBOUND_MEDIA_KEYS = [
   ['photo', 'photo'],
+  ['sticker', 'sticker'],
   ['document', 'document'],
   ['video', 'video'],
   ['audio', 'audio'],
@@ -73,8 +74,11 @@ function pickLargestPhoto(message) {
  *   inboundImageToModel: bool attach a vision block for photos (default false)
  *   ctx:                      plugin ctx, used to resolve the `attachments`
  *                             service for the optional vision block (optional)
+ *   onSticker(botId, rawSticker): best-effort sticker/pack collection hook
+ *                             (optional). May return { setCollected, setName,
+ *                             total, error } to enrich the agent note.
  */
-export function createInboundMediaModule({ clientFor, log = () => {}, inboundMediaDir, inboundImageToModel, ctx }) {
+export function createInboundMediaModule({ clientFor, log = () => {}, inboundMediaDir, inboundImageToModel, ctx, onSticker }) {
   // -----------------------------------------------------------------------
   // Inbound media download + forward (parity with QwenPaw). When the user
   // sends a photo/document/video/audio/voice we:
@@ -98,9 +102,12 @@ export function createInboundMediaModule({ clientFor, log = () => {}, inboundMed
   function inboundMediaFileId(message) {
     const largest = pickLargestPhoto(message);
     if (largest) return largest.fileId || null;
+    if (message?.sticker?.file_id) return message.sticker.file_id;
     const m = message?.document || message?.video || message?.audio || message?.voice;
     return (m && m.file_id) ? m.file_id : null;
   }
+
+  const stickerField = (message) => (message?.sticker && message.sticker.file_id ? message.sticker : null);
 
   /**
    * Download an inbound media message and build a note (+ optional vision
@@ -109,6 +116,7 @@ export function createInboundMediaModule({ clientFor, log = () => {}, inboundMed
    * broken media item can never abort the inbound turn.
    */
   async function downloadAndDescribeInboundMedia(botId, message) {
+    let packNote = '';
     try {
       const tgClient = clientFor(botId);
       const kind = inboundMediaKind(message);
@@ -127,20 +135,49 @@ export function createInboundMediaModule({ clientFor, log = () => {}, inboundMed
         return { note: `(the user sent a ${kind} but it could not be downloaded)`, imageBlock: null, localPath: null };
       }
 
+      // Sticker auto-collection: let the caller (index.js) record this sticker
+      // AND its whole pack into the sticker catalog. Best-effort — a catalog
+      // failure must never break the inbound turn (the note still goes out).
+      if (stickerField(message) && typeof onSticker === 'function') {
+        try {
+          const collected = await onSticker(botId, stickerField(message));
+          if (collected && collected.setCollected !== undefined) {
+            packNote = collected.setCollected
+              ? ` Its full pack “${collected.setName}” (${collected.total} stickers) is now in the sticker catalog.`
+              : ` (sticker recorded; pack fetch failed: ${collected.error || 'unknown error'})`;
+          }
+        } catch (err) {
+          log('warn', `Sticker collection failed: ${err.message}`);
+        }
+      }
+
       // Human/agent-facing description. Attacker-controlled fields
       // (file_name, caption) are sanitized before interpolation — they would
       // otherwise let any Telegram user inject control text into the agent.
       const photo = pickLargestPhoto(message);
       const dims = (photo?.width && photo?.height) ? ` (${photo.width}×${photo.height})` : '';
-      const raw = message.document || message.video || message.audio || message.voice;
+      const sticker = message.sticker;
+      const raw = message.document || message.video || message.audio || message.voice || sticker;
       let meta = '';
       if (raw && raw.file_name) meta += ` “${sanitizeForNote(raw.file_name, 200)}”`;
       if (raw && typeof raw.file_size === 'number') meta += ` ${Math.round(raw.file_size / 1024)} KB`;
       if (raw && typeof raw.duration === 'number') meta += ` ${raw.duration}s`;
+      if (sticker) {
+        const fmt = sticker.is_animated ? 'animated' : (sticker.is_video ? 'video' : 'static');
+        meta = ` ${sticker.emoji || '•'} (${fmt}`
+          + `${sticker.width && sticker.height ? `, ${sticker.width}×${sticker.height}` : ''})`
+          + (sticker.set_name ? ` from set “${sanitizeForNote(sticker.set_name, 100)}”` : '')
+          + ` — file_id: ${sticker.file_id}, file_unique_id: ${sticker.file_unique_id || 'n/a'}`
+          + meta;
+      }
 
       const note =
         `The user sent a ${kind}${dims}${meta}. ` +
         `It has been saved locally to: ${dl.localPath} — you can read/process it with your file tools.` +
+        (sticker
+          ? ` You can resend it with telegram_send_sticker using its file_id or file_unique_id, or by defining an alias.`
+          : '') +
+        packNote +
         (message.text ? ` Their caption: “${sanitizeForNote(message.text, 500)}”` : '');
 
       // Optional vision block (photos only, and only when explicitly enabled).
